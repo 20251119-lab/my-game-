@@ -1,0 +1,1316 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>霓虹競技場 · 五技能對戰</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    height:100%;
+    background:#05070d;
+    display:flex; align-items:center; justify-content:center;
+    font-family: 'Segoe UI', system-ui, -apple-system, 'PingFang TC', 'Microsoft JhengHei', sans-serif;
+    overflow:hidden;
+  }
+  #wrap { display:flex; flex-direction:column; align-items:center; gap:8px; }
+  canvas {
+    display:block;
+    max-width:100vw;
+    max-height:calc(100vh - 64px);
+    border-radius:14px;
+    box-shadow: 0 0 70px rgba(60,120,255,.15), 0 0 0 1px rgba(90,140,255,.18);
+    background:#0a0e17;
+  }
+  #hint {
+    color:#43536f; font-size:12px; letter-spacing:1px; user-select:none;
+    text-align:center; line-height:1.7;
+  }
+  #hint b { color:#6d8ab8; font-weight:600; }
+  #hint .p1 { color:#3ddcff; }
+  #hint .p2 { color:#ff4d8d; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game"></canvas>
+  <div id="hint">
+    <span class="p1">P1</span> WASD · F射擊 · Shift衝刺 · Q三連發 · E治療 · R雷射 · C飛彈<br>
+    <span class="p2">P2</span> 方向鍵 · Enter射擊 · L護盾 · .冰霜 · 右Shift瞬移 · K減速 · M黑洞<br>
+    <b>R</b> 重新開始（遊戲結束或倒數時）
+  </div>
+</div>
+<script>
+(function(){
+'use strict';
+
+/* ================= 基礎設定 ================= */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = 960, H = 600;
+canvas.width = W;
+canvas.height = H;
+
+/* ================= 音效 ================= */
+let actx = null;
+function initAudio(){
+  if (actx) return;
+  try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){}
+}
+function sfx(freq, dur, type, vol){
+  if (!actx) return;
+  try {
+    const t = actx.currentTime;
+    const o = actx.createOscillator();
+    const g = actx.createGain();
+    o.type = type || 'square';
+    o.frequency.setValueAtTime(freq, t);
+    o.frequency.exponentialRampToValueAtTime(Math.max(30, freq * 0.45), t + dur);
+    g.gain.setValueAtTime(vol || 0.04, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(actx.destination);
+    o.start(t); o.stop(t + dur + 0.02);
+  } catch(e){}
+}
+
+/* ================= 地圖 ================= */
+const obstacles = [
+  {x:440, y:260, w:80,  h:80},
+  {x:180, y:90,  w:130, h:26},
+  {x:650, y:90,  w:130, h:26},
+  {x:180, y:484, w:130, h:26},
+  {x:650, y:484, w:130, h:26}
+];
+
+/* ================= 技能定義 ================= */
+const SKILLS = {
+  // P1
+  dash:   { key:'ShiftLeft',  alt:'KeyZ',   cd:3.0,  name:'衝刺',   color:'#3ddcff' },
+  triple: { key:'KeyQ',       alt:'KeyX',   cd:5.0,  name:'三連發', color:'#7df9ff' },
+  heal:   { key:'KeyE',       alt:'KeyV',   cd:10.0, name:'治療',   color:'#5dff9e' },
+  laser:  { key:'KeyR',       alt:'KeyT',   cd:8.0,  name:'雷射',   color:'#ff5df0' },
+  missile:{ key:'KeyC',       alt:'KeyB',   cd:9.0,  name:'追蹤飛彈', color:'#ffb347' },
+  // P2
+  shield: { key:'KeyL',       alt:'Semicolon', cd:4.0,  name:'護盾',   color:'#ffffff' },
+  frost:  { key:'Period',     alt:'Comma',  cd:6.0,  name:'冰霜彈', color:'#8ad8ff' },
+  blink:  { key:'ShiftRight', alt:'Numpad0', cd:7.0,  name:'瞬移',   color:'#ff9edb' },
+  slow:   { key:'KeyK',       alt:'KeyI',   cd:10.0, name:'時間減速', color:'#b07dff' },
+  blackhole:{ key:'KeyM',     alt:'KeyN',   cd:12.0, name:'黑洞',   color:'#7a3dff' }
+};
+
+/* ================= 玩家 ================= */
+function mkPlayer(x, y, color, controls, name, skillList){
+  const skillState = {};
+  for (let i = 0; i < skillList.length; i++){
+    const id = skillList[i];
+    skillState[id] = {
+      cd: 0,
+      maxCd: SKILLS[id].cd,
+      active: 0,
+      held: false,
+      pending: false
+    };
+  }
+  return {
+    x, y, spawnX:x, spawnY:y,
+    r:16, hp:100, maxHp:100,
+    color, name, controls,
+    aim:0, cd:0, flash:0, score:0,
+    lastMoveX: 0, lastMoveY: 0,
+    slowTimer: 0,
+    timeSlowTimer: 0,     // 被時間減速
+    skills: skillState,
+    skillOrder: skillList
+  };
+}
+
+const p1 = mkPlayer(110, 300, '#3ddcff', {
+  up:'KeyW', down:'KeyS', left:'KeyA', right:'KeyD',
+  shoot:'KeyF', shootAlt:'Space'
+}, 'P1', ['dash', 'triple', 'heal', 'laser', 'missile']);
+
+const p2 = mkPlayer(850, 300, '#ff4d8d', {
+  up:'ArrowUp', down:'ArrowDown', left:'ArrowLeft', right:'ArrowRight',
+  shoot:'Enter', shootAlt:'Slash'
+}, 'P2', ['shield', 'frost', 'blink', 'slow', 'blackhole']);
+
+/* ================= 特殊實體 ================= */
+let lasers = [];      // 雷射
+let missiles = [];    // 追蹤飛彈
+let blackholes = [];  // 黑洞
+
+/* ================= 狀態 ================= */
+let bullets = [];
+let particles = [];
+let state = 'countdown';
+let countdown = 3.2;
+let winner = null;
+let shake = 0;
+let timeSlowVisual = 0;   // 畫面紫色濾鏡強度
+
+/* ================= 輸入 ================= */
+const pressed = new Set();
+const pressedKeys = new Set();
+
+const PREVENT = new Set([
+  'Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight',
+  'Enter','KeyF','ShiftLeft','ShiftRight',
+  'Slash','KeyQ','KeyZ','KeyE','KeyX','KeyV','KeyT','KeyC','KeyB',
+  'Period','Comma','Numpad0','KeyL','Semicolon','KeyK','KeyI','KeyM','KeyN'
+]);
+
+window.addEventListener('keydown', e => {
+  initAudio();
+  if (PREVENT.has(e.code)) e.preventDefault();
+  if (e.key === 'Enter' || e.key === ' ') e.preventDefault();
+
+  pressed.add(e.code);
+  if (e.key) pressedKeys.add(e.key);
+
+  if (e.code === 'KeyR' && state !== 'playing'){
+    resetRound(true);
+  }
+}, { passive: false });
+
+window.addEventListener('keyup', e => {
+  pressed.delete(e.code);
+  if (e.key) pressedKeys.delete(e.key);
+});
+
+window.addEventListener('blur', () => {
+  pressed.clear();
+  pressedKeys.clear();
+});
+
+function isDown(code, alt){
+  if (pressed.has(code)) return true;
+  if (alt && pressed.has(alt)) return true;
+  if (pressedKeys.has(code)) return true;
+  if (alt && pressedKeys.has(alt)) return true;
+  return false;
+}
+
+/* ================= 回合控制 ================= */
+function resetRound(keepScore){
+  resetPlayer(p1);
+  resetPlayer(p2);
+  if (!keepScore){ p1.score = 0; p2.score = 0; }
+  bullets = [];
+  particles = [];
+  lasers = [];
+  missiles = [];
+  blackholes = [];
+  state = 'countdown';
+  countdown = 3.2;
+  winner = null;
+  shake = 0;
+  timeSlowVisual = 0;
+  pressed.clear();
+  pressedKeys.clear();
+}
+
+function resetPlayer(p){
+  p.x = p.spawnX; p.y = p.spawnY;
+  p.hp = p.maxHp; p.cd = 0; p.flash = 0;
+  p.lastMoveX = 0; p.lastMoveY = 0;
+  p.slowTimer = 0;
+  p.timeSlowTimer = 0;
+  for (const id in p.skills){
+    const s = p.skills[id];
+    s.cd = 0;
+    s.active = 0;
+    s.held = false;
+    s.pending = false;
+  }
+}
+
+/* ================= 幾何工具 ================= */
+function pushOut(p, o){
+  const cx = Math.max(o.x, Math.min(p.x, o.x + o.w));
+  const cy = Math.max(o.y, Math.min(p.y, o.y + o.h));
+  const dx = p.x - cx, dy = p.y - cy;
+  const d2 = dx*dx + dy*dy;
+  if (d2 > p.r * p.r) return;
+  const d = Math.sqrt(d2);
+  if (d < 0.0001){
+    const L = p.x - o.x, R = o.x + o.w - p.x;
+    const T = p.y - o.y, B = o.y + o.h - p.y;
+    const m = Math.min(L, R, T, B);
+    if (m === L) p.x = o.x - p.r;
+    else if (m === R) p.x = o.x + o.w + p.r;
+    else if (m === T) p.y = o.y - p.r;
+    else p.y = o.y + o.h + p.r;
+    return;
+  }
+  const ov = p.r - d;
+  p.x += (dx / d) * ov;
+  p.y += (dy / d) * ov;
+}
+
+function hitsRect(b, o){
+  const cx = Math.max(o.x, Math.min(b.x, o.x + o.w));
+  const cy = Math.max(o.y, Math.min(b.y, o.y + o.h));
+  return Math.hypot(b.x - cx, b.y - cy) < b.r;
+}
+
+function pointBlocked(x, y, r){
+  for (let k = 0; k < obstacles.length; k++){
+    const o = obstacles[k];
+    const cx = Math.max(o.x, Math.min(x, o.x + o.w));
+    const cy = Math.max(o.y, Math.min(y, o.y + o.h));
+    if (Math.hypot(x - cx, y - cy) < r) return true;
+  }
+  return false;
+}
+
+function hexA(hex, a){
+  let h = hex.replace('#', '');
+  if (h.length === 3){
+    h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+  }
+  const n = parseInt(h, 16);
+  return 'rgba(' + ((n>>16)&255) + ',' + ((n>>8)&255) + ',' + (n&255) + ',' + a + ')';
+}
+
+function rr(c, x, y, w, h, r){
+  r = Math.max(0, Math.min(r, Math.abs(w)/2, Math.abs(h)/2));
+  c.beginPath();
+  c.moveTo(x + r, y);
+  c.arcTo(x + w, y, x + w, y + h, r);
+  c.arcTo(x + w, y + h, x, y + h, r);
+  c.arcTo(x, y + h, x, y, r);
+  c.arcTo(x, y, x + w, y, r);
+  c.closePath();
+}
+
+/* ================= 粒子 ================= */
+function burst(x, y, color, n, spd){
+  for (let i = 0; i < n; i++){
+    const a = Math.random() * Math.PI * 2;
+    const s = Math.random() * spd;
+    const life = 0.22 + Math.random() * 0.45;
+    particles.push({
+      x:x, y:y,
+      vx: Math.cos(a)*s, vy: Math.sin(a)*s,
+      r: 1 + Math.random()*2.6,
+      life:life, maxLife:life, color:color
+    });
+  }
+}
+
+function updateParticles(dt){
+  for (let i = particles.length - 1; i >= 0; i--){
+    const q = particles[i];
+    q.x += q.vx * dt;
+    q.y += q.vy * dt;
+    const damp = Math.pow(0.06, dt);
+    q.vx *= damp;
+    q.vy *= damp;
+    q.life -= dt;
+    if (q.life <= 0) particles.splice(i, 1);
+  }
+}
+
+/* ================= 射擊 ================= */
+function fireBullet(p, angle, opts){
+  opts = opts || {};
+  const spd = opts.spd || 700;
+
+  let safeDist = p.r + 6;
+  const maxDist = p.r + 18;
+  for (let d = p.r + 6; d <= maxDist; d += 2){
+    const tx = p.x + Math.cos(angle) * d;
+    const ty = p.y + Math.sin(angle) * d;
+    if (!pointBlocked(tx, ty, 6)) safeDist = d;
+  }
+
+  const bx = p.x + Math.cos(angle) * safeDist;
+  const by = p.y + Math.sin(angle) * safeDist;
+
+  if (pointBlocked(bx, by, 6)) return;
+
+  bullets.push({
+    x: bx, y: by,
+    vx: Math.cos(angle) * spd,
+    vy: Math.sin(angle) * spd,
+    r: opts.r || 5,
+    owner: p,
+    life: 2.5,
+    frost: !!opts.frost,
+    color: opts.color || p.color
+  });
+}
+
+function fire(p){
+  const s = p.skills;
+
+  if (s.triple && s.triple.pending){
+    const a = p.aim;
+    fireBullet(p, a - 0.16);
+    fireBullet(p, a);
+    fireBullet(p, a + 0.16);
+    s.triple.pending = false;
+    p.flash = 0.1;
+    burst(p.x + Math.cos(a)*20, p.y + Math.sin(a)*20, '#7df9ff', 10, 200);
+    sfx(760, 0.07, 'square', 0.03);
+    return;
+  }
+
+  if (s.frost && s.frost.pending){
+    const a = p.aim + (Math.random() - 0.5) * 0.04;
+    fireBullet(p, a, { frost: true, color: '#8ad8ff', r: 7 });
+    s.frost.pending = false;
+    p.flash = 0.08;
+    burst(p.x + Math.cos(a)*20, p.y + Math.sin(a)*20, '#8ad8ff', 10, 180);
+    sfx(480, 0.12, 'sine', 0.035);
+    return;
+  }
+
+  const a = p.aim + (Math.random() - 0.5) * 0.07;
+  fireBullet(p, a);
+  p.flash = 0.07;
+
+  for (let i = 0; i < 4; i++){
+    const pa = a + (Math.random() - 0.5) * 1.3;
+    const ps = 60 + Math.random() * 150;
+    const life = 0.16 + Math.random() * 0.12;
+    particles.push({
+      x: p.x + Math.cos(a)*20, y: p.y + Math.sin(a)*20,
+      vx: Math.cos(pa)*ps, vy: Math.sin(pa)*ps,
+      r: 1 + Math.random()*1.6,
+      life: life, maxLife: life, color: p.color
+    });
+  }
+
+  sfx(620 + Math.random()*90, 0.055, 'square', 0.022);
+}
+
+/* ================= 傷害 ================= */
+function damage(target, amt, b, opts){
+  opts = opts || {};
+  if (state === 'over') return;
+  if (target.hp <= 0) return;
+
+  if (target.skills.shield && target.skills.shield.active > 0){
+    const ang = Math.atan2(b.y - target.y, b.x - target.x);
+    burst(b.x, b.y, '#ffffff', 10, 180);
+    for (let i = 0; i < 10; i++){
+      const a2 = ang + (Math.random() - 0.5) * 1.0;
+      const s = 80 + Math.random() * 140;
+      const life = 0.25 + Math.random() * 0.15;
+      particles.push({
+        x: target.x + Math.cos(ang) * (target.r + 6),
+        y: target.y + Math.sin(ang) * (target.r + 6),
+        vx: Math.cos(a2) * s, vy: Math.sin(a2) * s,
+        r: 1.5 + Math.random() * 2.5,
+        life: life, maxLife: life, color: '#ffffff'
+      });
+    }
+    target.flash = Math.max(target.flash, 0.12);
+    sfx(300, 0.09, 'sine', 0.035);
+    return;
+  }
+
+  target.hp -= amt;
+
+  if (b && b.frost){
+    target.slowTimer = Math.max(target.slowTimer, 2.0);
+    burst(b.x, b.y, '#8ad8ff', 14, 160);
+    sfx(380, 0.15, 'sine', 0.04);
+  }
+
+  if (b){
+    target.flash = 0.25;
+    burst(b.x, b.y, b.color || target.color, 12, 210);
+  } else {
+    target.flash = 0.25;
+    burst(target.x, target.y, opts.color || target.color, 16, 240);
+  }
+  shake = Math.min(11, shake + 7);
+  sfx(180, 0.16, 'sawtooth', 0.05);
+
+  if (target.hp <= 0){
+    target.hp = 0;
+    state = 'over';
+    winner = (target === p1) ? p2 : p1;
+    winner.score++;
+    burst(target.x, target.y, target.color, 46, 340);
+    burst(target.x, target.y, '#ffffff', 18, 220);
+    shake = 16;
+    sfx(110, 0.7, 'sawtooth', 0.08);
+    sfx(70, 0.9, 'triangle', 0.07);
+  }
+}
+
+/* ================= 技能使用 ================= */
+function tryUseSkill(p, id){
+  const s = p.skills[id];
+  if (!s) return;
+  if (s.cd > 0 || s.active > 0 || s.pending) return;
+
+  const def = SKILLS[id];
+  const foe = (p === p1) ? p2 : p1;
+
+  if (id === 'dash'){
+    s.active = 0.35;
+    s.cd = s.maxCd;
+    burst(p.x, p.y, def.color, 20, 260);
+    sfx(880, 0.12, 'sine', 0.05);
+  } else if (id === 'triple'){
+    s.pending = true;
+    s.cd = s.maxCd;
+    burst(p.x, p.y, def.color, 12, 180);
+    sfx(700, 0.1, 'triangle', 0.04);
+  } else if (id === 'heal'){
+    const before = p.hp;
+    p.hp = Math.min(p.maxHp, p.hp + 25);
+    if (p.hp > before){
+      burst(p.x, p.y, def.color, 18, 160);
+      sfx(520, 0.25, 'sine', 0.05);
+    }
+    s.cd = s.maxCd;
+  } else if (id === 'laser'){
+    // 雷射：沿瞄準方向發射，貫穿一切
+    lasers.push({
+      x: p.x, y: p.y,
+      angle: p.aim,
+      life: 0.35,
+      maxLife: 0.35,
+      owner: p,
+      color: def.color
+    });
+    s.cd = s.maxCd;
+    burst(p.x + Math.cos(p.aim)*30, p.y + Math.sin(p.aim)*30, def.color, 20, 260);
+    shake = Math.min(10, shake + 6);
+    sfx(1200, 0.25, 'sawtooth', 0.05);
+    // 立即對路徑上的對手造成傷害
+    const dx = foe.x - p.x, dy = foe.y - p.y;
+    const dist = Math.hypot(dx, dy);
+    const dot = dx * Math.cos(p.aim) + dy * Math.sin(p.aim);
+    if (dot > 0 && dist > 0){
+      const perp = Math.abs(-dx * Math.sin(p.aim) + dy * Math.cos(p.aim));
+      if (perp < foe.r + 10){
+        damage(foe, 20, null, { color: def.color });
+      }
+    }
+  } else if (id === 'missile'){
+    // 追蹤飛彈：發射 2 枚
+    for (let i = 0; i < 2; i++){
+      const offset = (i - 0.5) * 0.4;
+      missiles.push({
+        x: p.x + Math.cos(p.aim + offset) * 24,
+        y: p.y + Math.sin(p.aim + offset) * 24,
+        vx: Math.cos(p.aim + offset) * 300,
+        vy: Math.sin(p.aim + offset) * 300,
+        angle: p.aim + offset,
+        life: 3.0,
+        r: 6,
+        owner: p,
+        target: foe,
+        color: def.color
+      });
+    }
+    s.cd = s.maxCd;
+    burst(p.x, p.y, def.color, 16, 220);
+    sfx(420, 0.2, 'sawtooth', 0.04);
+  } else if (id === 'shield'){
+    s.active = 1.2;
+    s.cd = s.maxCd;
+    burst(p.x, p.y, '#ffffff', 16, 160);
+    sfx(500, 0.2, 'triangle', 0.05);
+  } else if (id === 'frost'){
+    s.pending = true;
+    s.cd = s.maxCd;
+    burst(p.x, p.y, def.color, 12, 180);
+    sfx(560, 0.12, 'sine', 0.04);
+  } else if (id === 'blink'){
+    const dist = 120;
+    const steps = 12;
+    let tx = p.x, ty = p.y;
+    for (let i = 1; i <= steps; i++){
+      const nx = p.x + Math.cos(p.aim) * (dist * i / steps);
+      const ny = p.y + Math.sin(p.aim) * (dist * i / steps);
+      const cx = Math.max(0, Math.min(W, nx));
+      const cy = Math.max(0, Math.min(H, ny));
+      if (pointBlocked(cx, cy, p.r)) break;
+      tx = cx; ty = cy;
+    }
+    burst(p.x, p.y, def.color, 14, 200);
+    p.x = tx; p.y = ty;
+    burst(p.x, p.y, def.color, 14, 200);
+    s.cd = s.maxCd;
+    sfx(960, 0.15, 'sine', 0.05);
+  } else if (id === 'slow'){
+    // 時間減速：對手移動速度 -40%，持續 3 秒
+    foe.timeSlowTimer = Math.max(foe.timeSlowTimer, 3.0);
+    timeSlowVisual = Math.max(timeSlowVisual, 0.5);
+    s.cd = s.maxCd;
+    burst(foe.x, foe.y, def.color, 24, 200);
+    sfx(260, 0.4, 'sine', 0.05);
+  } else if (id === 'blackhole'){
+    // 黑洞：在對手位置生成，持續 2 秒
+    blackholes.push({
+      x: foe.x, y: foe.y,
+      life: 2.0,
+      maxLife: 2.0,
+      r: 8,
+      maxR: 70,
+      owner: p,
+      color: def.color,
+      tickTimer: 0
+    });
+    s.cd = s.maxCd;
+    burst(foe.x, foe.y, def.color, 20, 200);
+    sfx(140, 0.5, 'sawtooth', 0.05);
+  }
+}
+
+/* ================= 更新：雷射 ================= */
+function updateLasers(dt){
+  for (let i = lasers.length - 1; i >= 0; i--){
+    lasers[i].life -= dt;
+    if (lasers[i].life <= 0) lasers.splice(i, 1);
+  }
+}
+
+/* ================= 更新：飛彈 ================= */
+function updateMissiles(dt){
+  for (let i = missiles.length - 1; i >= 0; i--){
+    const m = missiles[i];
+    m.life -= dt;
+
+    // 追蹤目標
+    if (m.target && m.target.hp > 0){
+      const desired = Math.atan2(m.target.y - m.y, m.target.x - m.x);
+      let diff = desired - m.angle;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      m.angle += Math.sign(diff) * Math.min(Math.abs(diff), 4.5 * dt);
+    }
+
+    const spd = 380;
+    m.vx = Math.cos(m.angle) * spd;
+    m.vy = Math.sin(m.angle) * spd;
+    m.x += m.vx * dt;
+    m.y += m.vy * dt;
+
+    // 拖尾粒子
+    if (Math.random() < 0.7){
+      particles.push({
+        x: m.x, y: m.y,
+        vx: (Math.random() - 0.5) * 40,
+        vy: (Math.random() - 0.5) * 40,
+        r: 1 + Math.random() * 2,
+        life: 0.2, maxLife: 0.2,
+        color: m.color
+      });
+    }
+
+    let dead = false;
+
+    if (m.life <= 0 || m.x < -20 || m.x > W + 20 || m.y < -20 || m.y > H + 20){
+      dead = true;
+    }
+
+    // 撞障礙物
+    if (!dead){
+      for (let k = 0; k < obstacles.length; k++){
+        if (hitsRect(m, obstacles[k])){
+          burst(m.x, m.y, m.color, 10, 180);
+          dead = true;
+          break;
+        }
+      }
+    }
+
+    // 撞對手
+    if (!dead){
+      const foe = m.target;
+      if (foe && foe.hp > 0 && Math.hypot(m.x - foe.x, m.y - foe.y) < foe.r + m.r){
+        damage(foe, 10, { x: m.x, y: m.y, color: m.color });
+        burst(m.x, m.y, m.color, 14, 220);
+        dead = true;
+      }
+    }
+
+    if (dead) missiles.splice(i, 1);
+  }
+}
+
+/* ================= 更新：黑洞 ================= */
+function updateBlackholes(dt){
+  for (let i = blackholes.length - 1; i >= 0; i--){
+    const bh = blackholes[i];
+    bh.life -= dt;
+    bh.tickTimer += dt;
+
+    // 黑洞視覺粒子
+    if (Math.random() < 0.8){
+      const ang = Math.random() * Math.PI * 2;
+      const dist = 40 + Math.random() * 40;
+      particles.push({
+        x: bh.x + Math.cos(ang) * dist,
+        y: bh.y + Math.sin(ang) * dist,
+        vx: -Math.cos(ang) * 160,
+        vy: -Math.sin(ang) * 160,
+        r: 1 + Math.random() * 2,
+        life: 0.3, maxLife: 0.3,
+        color: bh.color
+      });
+    }
+
+    // 吸引對手
+    const foe = (bh.owner === p1) ? p2 : p1;
+    if (foe.hp > 0 && bh.life > 0){
+      const dx = bh.x - foe.x;
+      const dy = bh.y - foe.y;
+      const d = Math.hypot(dx, dy);
+      if (d > 4 && d < 220){
+        const pull = 260 * dt;
+        foe.x += (dx / d) * pull;
+        foe.y += (dy / d) * pull;
+        foe.x = Math.max(foe.r, Math.min(W - foe.r, foe.x));
+        foe.y = Math.max(foe.r, Math.min(H - foe.r, foe.y));
+        for (let k = 0; k < obstacles.length; k++) pushOut(foe, obstacles[k]);
+      }
+    }
+
+    // 每 0.4 秒造成 5 傷害
+    if (bh.tickTimer >= 0.4 && bh.life > 0){
+      bh.tickTimer -= 0.4;
+      if (foe.hp > 0 && Math.hypot(bh.x - foe.x, bh.y - foe.y) < 70){
+        damage(foe, 5, null, { color: bh.color });
+      }
+    }
+
+    if (bh.life <= 0) blackholes.splice(i, 1);
+  }
+}
+
+/* ================= 更新：玩家 ================= */
+function updatePlayer(p, foe, dt){
+  for (let i = 0; i < p.skillOrder.length; i++){
+    const id = p.skillOrder[i];
+    const s = p.skills[id];
+    const def = SKILLS[id];
+    const down = isDown(def.key, def.alt);
+    if (down && !s.held) tryUseSkill(p, id);
+    s.held = down;
+  }
+
+  for (const id in p.skills){
+    const s = p.skills[id];
+    if (s.active > 0) s.active = Math.max(0, s.active - dt);
+    if (s.cd > 0) s.cd = Math.max(0, s.cd - dt);
+  }
+
+  let speedMul = 1;
+  if (p.slowTimer > 0){
+    p.slowTimer = Math.max(0, p.slowTimer - dt);
+    speedMul *= 0.5;
+  }
+  if (p.timeSlowTimer > 0){
+    p.timeSlowTimer = Math.max(0, p.timeSlowTimer - dt);
+    speedMul *= 0.6;
+  }
+
+  const c = p.controls;
+  let dx = 0, dy = 0;
+  if (isDown(c.up))    dy -= 1;
+  if (isDown(c.down))  dy += 1;
+  if (isDown(c.left))  dx -= 1;
+  if (isDown(c.right)) dx += 1;
+
+  const len = Math.hypot(dx, dy);
+  if (len > 0){
+    dx /= len; dy /= len;
+    p.lastMoveX = dx;
+    p.lastMoveY = dy;
+  }
+
+  let spd = 255 * speedMul;
+  if (p.skills.dash && p.skills.dash.active > 0) spd = 720 * speedMul;
+
+  p.x += dx * spd * dt;
+  p.y += dy * spd * dt;
+
+  p.x = Math.max(p.r, Math.min(W - p.r, p.x));
+  p.y = Math.max(p.r, Math.min(H - p.r, p.y));
+
+  for (let i = 0; i < obstacles.length; i++) pushOut(p, obstacles[i]);
+
+  p.aim = Math.atan2(foe.y - p.y, foe.x - p.x);
+
+  p.cd -= dt;
+  if (isDown(c.shoot, c.shootAlt) && p.cd <= 0){
+    fire(p);
+    p.cd = 0.34;
+  }
+}
+
+function updateBullets(dt){
+  const toRemove = [];
+
+  for (let i = 0; i < bullets.length; i++){
+    const b = bullets[i];
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    b.life -= dt;
+
+    let dead = false;
+
+    if (b.life <= 0 || b.x < b.r || b.x > W - b.r || b.y < b.r || b.y > H - b.r){
+      dead = true;
+    }
+
+    if (!dead){
+      for (let k = 0; k < obstacles.length; k++){
+        if (hitsRect(b, obstacles[k])){
+          burst(b.x, b.y, b.color || b.owner.color, 6, 130);
+          dead = true;
+          break;
+        }
+      }
+    }
+
+    if (!dead){
+      const target = (b.owner === p1) ? p2 : p1;
+      if (target.hp > 0 && Math.hypot(b.x - target.x, b.y - target.y) < target.r + b.r){
+        damage(target, 13, b);
+        dead = true;
+      }
+    }
+
+    if (dead) toRemove.push(i);
+  }
+
+  for (let i = toRemove.length - 1; i >= 0; i--){
+    bullets.splice(toRemove[i], 1);
+  }
+}
+
+function update(dt){
+  if (shake > 0) shake = Math.max(0, shake - dt * 55);
+  if (timeSlowVisual > 0) timeSlowVisual = Math.max(0, timeSlowVisual - dt);
+
+  if (state === 'countdown'){
+    countdown -= dt;
+    p1.aim = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+    p2.aim = Math.atan2(p1.y - p2.y, p1.x - p2.x);
+    if (countdown <= 0){
+      state = 'playing';
+      sfx(900, 0.14, 'square', 0.05);
+    }
+  } else if (state === 'playing'){
+    if (p1.hp > 0 && p2.hp > 0){
+      updatePlayer(p1, p2, dt);
+      updatePlayer(p2, p1, dt);
+    }
+    updateBullets(dt);
+    updateLasers(dt);
+    updateMissiles(dt);
+    updateBlackholes(dt);
+  }
+
+  updateParticles(dt);
+  p1.flash = Math.max(0, p1.flash - dt);
+  p2.flash = Math.max(0, p2.flash - dt);
+}
+
+/* ================= 繪製 ================= */
+let vignette = null;
+let vignetteW = 0, vignetteH = 0;
+
+function drawBackground(){
+  ctx.fillStyle = '#0a0e17';
+  ctx.fillRect(-20, -20, W + 40, H + 40);
+
+  ctx.strokeStyle = 'rgba(70,130,220,0.07)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x = 0; x <= W; x += 48){
+    ctx.moveTo(x + 0.5, 0);
+    ctx.lineTo(x + 0.5, H);
+  }
+  for (let y = 0; y <= H; y += 48){
+    ctx.moveTo(0, y + 0.5);
+    ctx.lineTo(W, y + 0.5);
+  }
+  ctx.stroke();
+
+  if (!vignette || vignetteW !== W || vignetteH !== H){
+    vignette = ctx.createRadialGradient(W/2, H/2, 140, W/2, H/2, Math.max(W,H) * 0.72);
+    vignette.addColorStop(0, 'rgba(0,0,0,0)');
+    vignette.addColorStop(1, 'rgba(0,0,0,0.62)');
+    vignetteW = W;
+    vignetteH = H;
+  }
+  ctx.fillStyle = vignette;
+  ctx.fillRect(0, 0, W, H);
+
+  // 時間減速畫面紫色濾鏡
+  if (timeSlowVisual > 0){
+    ctx.fillStyle = 'rgba(176,125,255,' + (timeSlowVisual * 0.12) + ')';
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  ctx.strokeStyle = 'rgba(90,150,255,0.22)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(1, 1, W - 2, H - 2);
+}
+
+function drawObstacles(){
+  for (let i = 0; i < obstacles.length; i++){
+    const o = obstacles[i];
+
+    ctx.save();
+    ctx.shadowColor = 'rgba(80,140,255,0.55)';
+    ctx.shadowBlur = 18;
+    ctx.fillStyle = '#16203a';
+    rr(ctx, o.x, o.y, o.w, o.h, 6);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.strokeStyle = 'rgba(110,170,255,0.45)';
+    ctx.lineWidth = 1.5;
+    rr(ctx, o.x, o.y, o.w, o.h, 6);
+    ctx.stroke();
+
+    ctx.strokeStyle = 'rgba(150,205,255,0.10)';
+    ctx.lineWidth = 1;
+    rr(ctx, o.x + 3, o.y + 3, o.w - 6, o.h - 6, 4);
+    ctx.stroke();
+  }
+}
+
+function drawPlayer(p){
+  if (p.skills.shield && p.skills.shield.active > 0){
+    const baseA = Math.min(1, p.skills.shield.active * 3);
+    const hitBoost = Math.min(1, p.flash * 6);
+    const a = Math.min(1, baseA + hitBoost * 0.5);
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,' + (0.55 * a + 0.15 * hitBoost) + ')';
+    ctx.lineWidth = 3 + hitBoost * 2;
+    ctx.shadowColor = '#ffffff';
+    ctx.shadowBlur = 20 + hitBoost * 30;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r + 12, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  if (p.skills.dash && p.skills.dash.active > 0){
+    let mx = p.lastMoveX, my = p.lastMoveY;
+    if (mx === 0 && my === 0){ mx = Math.cos(p.aim); my = Math.sin(p.aim); }
+    ctx.save();
+    ctx.globalAlpha = 0.35;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x - mx * 14, p.y - my * 14, p.r * 0.8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  if (p.slowTimer > 0){
+    ctx.save();
+    ctx.strokeStyle = 'rgba(138,216,255,0.6)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r + 5, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  if (p.timeSlowTimer > 0){
+    ctx.save();
+    ctx.strokeStyle = 'rgba(176,125,255,0.7)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r + 8, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  const gg = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r * 3.4);
+  gg.addColorStop(0, hexA(p.color, 0.42));
+  gg.addColorStop(1, hexA(p.color, 0));
+  ctx.fillStyle = gg;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, p.r * 3.4, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  ctx.rotate(p.aim);
+  ctx.fillStyle = hexA(p.color, 0.85);
+  rr(ctx, p.r * 0.35, -4.5, p.r * 1.0, 9, 3);
+  ctx.fill();
+  ctx.restore();
+
+  ctx.save();
+  ctx.shadowColor = p.color;
+  ctx.shadowBlur = 22;
+  ctx.fillStyle = p.color;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  ctx.fillStyle = '#eaf6ff';
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, p.r * 0.44, 0, Math.PI * 2);
+  ctx.fill();
+
+  if (p.flash > 0){
+    ctx.strokeStyle = 'rgba(255,255,255,' + Math.min(1, p.flash * 4.5) + ')';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r + 7, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  if (p.skills.triple && p.skills.triple.pending){
+    ctx.save();
+    ctx.fillStyle = '#7df9ff';
+    for (let i = -1; i <= 1; i++){
+      const a = p.aim + i * 0.16;
+      ctx.beginPath();
+      ctx.arc(p.x + Math.cos(a) * (p.r + 18), p.y + Math.sin(a) * (p.r + 18), 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  if (p.skills.frost && p.skills.frost.pending){
+    ctx.save();
+    ctx.fillStyle = '#8ad8ff';
+    ctx.shadowColor = '#8ad8ff';
+    ctx.shadowBlur = 10;
+    const bx = p.x + Math.cos(p.aim) * (p.r + 18);
+    const by = p.y + Math.sin(p.aim) * (p.r + 18);
+    ctx.beginPath();
+    ctx.arc(bx, by, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawLasers(){
+  for (let i = 0; i < lasers.length; i++){
+    const l = lasers[i];
+    const prog = 1 - l.life / l.maxLife;
+    const len = 1200 * Math.min(1, prog * 4);
+    const ex = l.x + Math.cos(l.angle) * len;
+    const ey = l.y + Math.sin(l.angle) * len;
+
+    ctx.save();
+    ctx.lineCap = 'round';
+
+    ctx.shadowColor = l.color;
+    ctx.shadowBlur = 30;
+    ctx.strokeStyle = hexA(l.color, 0.9 * (l.life / l.maxLife));
+    ctx.lineWidth = 14;
+    ctx.beginPath();
+    ctx.moveTo(l.x, l.y);
+    ctx.lineTo(ex, ey);
+    ctx.stroke();
+
+    ctx.shadowBlur = 15;
+    ctx.strokeStyle = 'rgba(255,255,255,' + (0.95 * (l.life / l.maxLife)) + ')';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(l.x, l.y);
+    ctx.lineTo(ex, ey);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+}
+
+function drawMissiles(){
+  for (let i = 0; i < missiles.length; i++){
+    const m = missiles[i];
+    ctx.save();
+    ctx.translate(m.x, m.y);
+    ctx.rotate(m.angle);
+
+    ctx.shadowColor = m.color;
+    ctx.shadowBlur = 20;
+    ctx.fillStyle = m.color;
+    ctx.beginPath();
+    ctx.moveTo(10, 0);
+    ctx.lineTo(-6, -5);
+    ctx.lineTo(-3, 0);
+    ctx.lineTo(-6, 5);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(0, 0, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+}
+
+function drawBlackholes(){
+  for (let i = 0; i < blackholes.length; i++){
+    const bh = blackholes[i];
+    const lifePct = bh.life / bh.maxLife;
+    const radius = bh.maxR * (1 - lifePct * 0.3);
+
+    ctx.save();
+
+    const grd = ctx.createRadialGradient(bh.x, bh.y, 0, bh.x, bh.y, radius);
+    grd.addColorStop(0, 'rgba(20,0,40,' + (0.95 * lifePct) + ')');
+    grd.addColorStop(0.4, hexA(bh.color, 0.5 * lifePct));
+    grd.addColorStop(1, hexA(bh.color, 0));
+
+    ctx.fillStyle = grd;
+    ctx.beginPath();
+    ctx.arc(bh.x, bh.y, radius, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = hexA(bh.color, 0.8 * lifePct);
+    ctx.lineWidth = 2;
+    ctx.shadowColor = bh.color;
+    ctx.shadowBlur = 25;
+    ctx.beginPath();
+    ctx.arc(bh.x, bh.y, radius * 0.6, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+}
+
+function drawBullets(){
+  ctx.lineCap = 'round';
+  for (let i = 0; i < bullets.length; i++){
+    const b = bullets[i];
+    const col = b.color || b.owner.color;
+
+    const tx = b.x - b.vx * 0.024;
+    const ty = b.y - b.vy * 0.024;
+    const grd = ctx.createLinearGradient(tx, ty, b.x, b.y);
+    grd.addColorStop(0, hexA(col, 0));
+    grd.addColorStop(1, hexA(col, 0.85));
+    ctx.strokeStyle = grd;
+    ctx.lineWidth = b.r * 1.7;
+    ctx.beginPath();
+    ctx.moveTo(tx, ty);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+
+    ctx.save();
+    ctx.shadowColor = col;
+    ctx.shadowBlur = 14;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r * 0.62, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawParticles(){
+  for (let i = 0; i < particles.length; i++){
+    const q = particles[i];
+    const a = Math.max(0, q.life / q.maxLife);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = q.color;
+    ctx.beginPath();
+    ctx.arc(q.x, q.y, Math.max(0.3, q.r * a), 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawBar(x, y, w, h, p, fromRight){
+  ctx.fillStyle = 'rgba(255,255,255,0.07)';
+  rr(ctx, x, y, w, h, h/2);
+  ctx.fill();
+
+  const pct = Math.max(0, p.hp / p.maxHp);
+  const fw = w * pct;
+
+  if (fw > 2){
+    const bx = fromRight ? x + w - fw : x;
+    ctx.save();
+    ctx.shadowColor = p.color;
+    ctx.shadowBlur = 14;
+    ctx.fillStyle = p.color;
+    rr(ctx, bx, y, fw, h, Math.min(h/2, fw/2));
+    ctx.fill();
+    ctx.restore();
+
+    ctx.fillStyle = 'rgba(255,255,255,0.22)';
+    rr(ctx, bx + 3, y + 3, Math.max(0, fw - 6), h/2 - 3, Math.min((h/2-3)/2, Math.max(0, fw-6)/2));
+    ctx.fill();
+  }
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+  ctx.lineWidth = 1;
+  rr(ctx, x, y, w, h, h/2);
+  ctx.stroke();
+}
+
+function drawSkillSlots(x, y, w, p, fromRight){
+  const n = p.skillOrder.length;
+  const gap = 5;
+  const slotW = (w - gap * (n - 1)) / n;
+  const slotH = 8;
+
+  for (let i = 0; i < n; i++){
+    const id = p.skillOrder[i];
+    const s = p.skills[id];
+    const def = SKILLS[id];
+    const sx = fromRight
+      ? x + w - slotW - (slotW + gap) * i
+      : x + (slotW + gap) * i;
+
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    rr(ctx, sx, y, slotW, slotH, 3);
+    ctx.fill();
+
+    let pct = 0;
+    if (s.pending) pct = 1;
+    else if (s.active > 0) pct = 1;
+    else pct = 1 - (s.cd / s.maxCd);
+
+    const fw = slotW * Math.max(0, pct);
+    if (fw > 1){
+      const bx = fromRight ? sx + slotW - fw : sx;
+      ctx.fillStyle = (pct >= 1) ? hexA(def.color, 0.9) : hexA(def.color, 0.35);
+      rr(ctx, bx, y, fw, slotH, 3);
+      ctx.fill();
+
+      if (pct >= 1){
+        ctx.save();
+        ctx.shadowColor = def.color;
+        ctx.shadowBlur = 8;
+        ctx.fillStyle = hexA(def.color, 0.7);
+        rr(ctx, bx, y, fw, slotH, 3);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    ctx.strokeStyle = (pct >= 1) ? hexA(def.color, 0.8) : 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = 1;
+    rr(ctx, sx, y, slotW, slotH, 3);
+    ctx.stroke();
+  }
+}
+
+function drawHUD(){
+  const bw = 340, bh = 18, by = 22, m = 28;
+
+  drawBar(m, by, bw, bh, p1, false);
+  drawBar(W - m - bw, by, bw, bh, p2, true);
+  drawSkillSlots(m, by + bh + 5, bw, p1, false);
+  drawSkillSlots(W - m - bw, by + bh + 5, bw, p2, true);
+
+  ctx.font = '600 14px system-ui, -apple-system, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = hexA(p1.color, 0.95);
+  ctx.fillText('P1', m, by + bh + 34);
+  ctx.fillStyle = '#43536f';
+  ctx.fillText('WASD · F · Shift/Q/E/R/C', m + 32, by + bh + 34);
+
+  ctx.textAlign = 'right';
+  ctx.fillStyle = hexA(p2.color, 0.95);
+  ctx.fillText('P2', W - m, by + bh + 34);
+  ctx.fillStyle = '#43536f';
+  ctx.fillText('方向鍵 · Enter · L/./Shift/K/M', W - m - 32, by + bh + 34);
+
+  ctx.textAlign = 'center';
+  ctx.font = '700 28px system-ui, -apple-system, sans-serif';
+  ctx.fillStyle = '#7d95bd';
+  ctx.fillText(p1.score + ' : ' + p2.score, W / 2, by + bh + 2);
+}
+
+function drawOverlay(){
+  if (state === 'countdown'){
+    const n = Math.ceil(countdown);
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = '800 150px system-ui, -apple-system, sans-serif';
+    ctx.fillStyle = 'rgba(225,238,255,0.92)';
+    ctx.shadowColor = 'rgba(90,160,255,0.9)';
+    ctx.shadowBlur = 45;
+    ctx.fillText(n > 0 ? String(n) : 'GO', W / 2, H / 2);
+    ctx.restore();
+  }
+
+  if (state === 'over'){
+    ctx.fillStyle = 'rgba(5,8,15,0.74)';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    ctx.font = '800 66px system-ui, -apple-system, sans-serif';
+    ctx.fillStyle = winner.color;
+    ctx.shadowColor = winner.color;
+    ctx.shadowBlur = 45;
+    ctx.fillText(winner.name + ' 勝利', W / 2, H / 2 - 42);
+
+    ctx.shadowBlur = 0;
+    ctx.font = '500 20px system-ui, -apple-system, sans-serif';
+    ctx.fillStyle = '#8fa8d0';
+    ctx.fillText('按 R 再來一場', W / 2, H / 2 + 52);
+    ctx.restore();
+  }
+}
+
+function render(){
+  ctx.fillStyle = '#0a0e17';
+  ctx.fillRect(0, 0, W, H);
+
+  drawBackground();
+
+  ctx.save();
+  if (shake > 0){
+    ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * shake);
+  }
+  drawObstacles();
+  drawParticles();
+  drawBlackholes();
+  drawLasers();
+  drawBullets();
+  drawMissiles();
+  drawPlayer(p2);
+  drawPlayer(p1);
+  ctx.restore();
+
+  drawHUD();
+  drawOverlay();
+}
+
+/* ================= 主迴圈 ================= */
+let lastT = performance.now();
+function loop(now){
+  let dt = (now - lastT) / 1000;
+  lastT = now;
+  if (dt > 0.05) dt = 0.05;
+  if (dt < 0) dt = 0;
+
+  update(dt);
+  render();
+
+  requestAnimationFrame(loop);
+}
+
+resetRound(false);
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
