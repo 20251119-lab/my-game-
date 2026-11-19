@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>霓虹競技場 Neon Arena | 首頁</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- 導覽列 -->
+    <nav class="navbar">
+        <div class="logo">霓虹<span>競技場</span></div>
+        <ul class="nav-links">
+            <li><a href="index.html" class="active">首頁</a></li>
+            <li><a href="products.html">遊戲介紹</a></li>
+            <li><a href="game.html">開始遊戲</a></li>
+            <li><a href="contact.html">聯絡我們</a></li>
+        </ul>
+    </nav>
+
+    <!-- 首頁輪播 -->
+    <header class="hero">
+        <div class="carousel-container">
+            <div class="carousel-slide fade">
+                <div class="game-bg bg-1"></div>
+                <div class="slide-text">雙人對戰，即刻開打</div>
+                <div class="slide-sub">全新長持續技能版本，考驗你的操作極限</div>
+            </div>
+            <div class="carousel-slide fade">
+                <div class="game-bg bg-2"></div>
+                <div class="slide-text">超載衝刺 vs 冰封領域</div>
+                <div class="slide-sub">10 種獨特技能，打造你的專屬戰鬥風格</div>
+            </div>
+            <div class="carousel-slide fade">
+                <div class="game-bg bg-3"></div>
+                <div class="slide-text">霓虹閃爍，勝負一瞬</div>
+                <div class="slide-sub">立即點擊「開始遊戲」，與好友展開對決</div>
+            </div>
+            
+            <div class="dots-container">
+                <span class="dot"></span>
+                <span class="dot"></span>
+                <span class="dot"></span>
+            </div>
+        </div>
+    </header>
+
+    <!-- 優惠與遊玩按鈕 -->
+    <section class="promo-section">
+        <h2>準備好挑戰極限了嗎？</h2>
+        <p>現在註冊會員，即可領取限量「霓虹競技場」專屬虛寶序號！</p>
+        <button id="promoBtn" class="cta-btn">領取專屬優惠</button>
+        <br><br>
+        <a href="game.html" class="cta-btn" style="background: var(--primary); color: #000; text-decoration: none;">立即遊玩</a>
+    </section>
+
+    <!-- 彈出式優惠視窗 -->
+    <div id="promoModal" class="modal">
+        <div class="modal-content">
+            <span class="close-btn">&times;</span>
+            <h2>🎉 恭喜獲得！</h2>
+            <p>專屬虛寶序號：</p>
+            <div class="promo-code">NEON-X1-2024</div>
+            <p>可於遊戲內兌換限定造型！</p>
+        </div>
+    </div>
+
+    <footer>
+        <p>&copy; 2024 霓虹競技場 Neon Arena. All rights reserved.</p>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+</html>
