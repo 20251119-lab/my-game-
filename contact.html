@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>霓虹競技場 Neon Arena | 聯絡我們</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="logo">霓虹<span>競技場</span></div>
+        <ul class="nav-links">
+            <li><a href="index.html">首頁</a></li>
+            <li><a href="products.html">遊戲介紹</a></li>
+            <li><a href="game.html">開始遊戲</a></li>
+            <li><a href="contact.html" class="active">聯絡我們</a></li>
+        </ul>
+    </nav>
+
+    <main class="page-content">
+        <h1 class="page-title">聯絡我們</h1>
+        <div class="contact-container">
+            <p>對遊戲有任何建議、遇到 Bug，或是想洽談合作嗎？歡迎填寫以下表單，我們將盡快與您聯繫。</p>
+            <form class="contact-form" id="contactForm">
+                <div class="form-group">
+                    <label for="name">玩家 ID / 姓名</label>
+                    <input type="text" id="name" placeholder="請輸入您的名稱" required>
+                </div>
+                <div class="form-group">
+                    <label for="email">您的電子郵件</label>
+                    <input type="email" id="email" placeholder="example@email.com" required>
+                </div>
+                <div class="form-group">
+                    <label for="message">訊息內容</label>
+                    <textarea id="message" rows="5" placeholder="請描述您的問題或建議..." required></textarea>
+                </div>
+                <button type="submit" class="cta-btn">送出訊息</button>
+            </form>
+        </div>
+    </main>
+
+    <footer>
+        <p>&copy; 2024 霓虹競技場 Neon Arena. All rights reserved.</p>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+</html>
